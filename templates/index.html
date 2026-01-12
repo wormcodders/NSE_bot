@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Signal Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <div class="logo-section">
+                    <div class="logo-icon">
+                        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <path d="M3 13H7L10 6L14 18L17 11H21" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <div class="logo-text">
+                        <h1>SignalBot</h1>
+                        <span class="tagline">Stock Analysis Dashboard</span>
+                    </div>
+                </div>
+                <div class="header-status">
+                    <div class="status-indicator" id="systemStatus">
+                        <span class="status-dot"></span>
+                        <span class="status-text">System Online</span>
+                    </div>
+                    <div class="last-updated" id="lastUpdated">
+                        Last Updated: --
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Tab Navigation -->
+            <div class="tab-navigation">
+                <button class="tab-btn active" data-tab="signals">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M22 12H18L15 21L9 3L6 12H2"/>
+                    </svg>
+                    <span>Live Signals</span>
+                </button>
+                <button class="tab-btn" data-tab="depth">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"/>
+                        <path d="M21 21L16.65 16.65"/>
+                    </svg>
+                    <span>Depth Analysis</span>
+                </button>
+            </div>
+
+            <!-- Tab Content -->
+            <div class="tab-content">
+                <!-- Signals Tab -->
+                <div class="tab-panel active" id="signals-panel">
+                    <div class="signals-header">
+                        <div class="signals-title">
+                            <h2>Market Scan Results</h2>
+                            <p>Automated buy/sell signal detection from uploaded tickers</p>
+                        </div>
+                        <div class="scan-info" id="scanInfo">
+                            <span class="info-badge">Scanning <span id="tickerCount">0</span> tickers</span>
+                            <span class="info-badge">Analysis time: <span id="analysisTime">0s</span></span>
+                        </div>
+                    </div>
+
+                    <!-- Buy Signals Section -->
+                    <section class="signal-section" id="buySignalsSection">
+                        <div class="section-header">
+                            <h3 class="buy-title">
+                                <span class="signal-icon">🟢</span>
+                                BUY SIGNALS
+                            </h3>
+                            <span class="signal-count" id="buyCount">0 signals</span>
+                        </div>
+                        <div class="signal-grid" id="buySignalsGrid">
+                            <div class="loading-skeleton">
+                                <div class="skeleton-card"></div>
+                                <div class="skeleton-card"></div>
+                                <div class="skeleton-card"></div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Sell Signals Section -->
+                    <section class="signal-section" id="sellSignalsSection">
+                        <div class="section-header">
+                            <h3 class="sell-title">
+                                <span class="signal-icon">🔴</span>
+                                SELL SIGNALS
+                            </h3>
+                            <span class="signal-count" id="sellCount">0 signals</span>
+                        </div>
+                        <div class="signal-grid" id="sellSignalsGrid">
+                            <div class="loading-skeleton">
+                                <div class="skeleton-card"></div>
+                                <div class="skeleton-card"></div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- No Signals Message -->
+                    <div class="no-signals-message" id="noSignalsMessage" style="display: none;">
+                        <div class="empty-state">
+                            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M22 12H18L15 21L9 3L6 12H2"/>
+                            </svg>
+                            <h3>No Signals Generated</h3>
+                            <p>No buy or sell signals were generated in the latest market scan.</p>
+                            <p class="hint">The market may be in a consolidation phase. Check back at the next scheduled scan.</p>
+                        </div>
+                    </div>
+
+                    <!-- Placeholder Message -->
+                    <div class="placeholder-message" id="placeholderMessage">
+                        <div class="empty-state">
+                            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <circle cx="12" cy="12" r="10"/>
+                                <path d="M12 6V12L16 14"/>
+                            </svg>
+                            <h3>Waiting for Market Scan</h3>
+                            <p>Signals will appear here after the scheduled analysis runs.</p>
+                            <p class="hint">Scheduled scan times: 9:30 AM, 12:00 PM, 3:00 PM IST</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Depth Analysis Tab -->
+                <div class="tab-panel" id="depth-panel">
+                    <div class="depth-header">
+                        <h2>Depth Analysis</h2>
+                        <p>Get comprehensive AI-powered analysis for any stock</p>
+                    </div>
+
+                    <!-- Search Form -->
+                    <div class="search-container">
+                        <div class="search-box">
+                            <svg class="search-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"/>
+                                <path d="M21 21L16.65 16.65"/>
+                            </svg>
+                            <input 
+                                type="text" 
+                                id="symbolInput" 
+                                placeholder="Enter stock symbol (e.g., INFY, TCS, RELIANCE)"
+                                autocomplete="off"
+                                maxlength="10"
+                            >
+                            <button class="analyze-btn" id="analyzeBtn">
+                                <span>Analyze</span>
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M5 12H19M19 12L12 5M19 12L12 19"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="search-hint">
+                            Enter a valid NSE stock symbol for comprehensive technical and fundamental analysis
+                        </div>
+                    </div>
+
+                    <!-- Analysis Results -->
+                    <div class="analysis-results" id="analysisResults">
+                        <!-- Initial State -->
+                        <div class="analysis-initial" id="analysisInitial">
+                            <div class="analysis-icon">
+                                <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                                    <path d="M12 2L2 7L12 12L22 7L12 2Z"/>
+                                    <path d="M2 17L12 22L22 17"/>
+                                    <path d="M2 12L12 17L22 12"/>
+                                </svg>
+                            </div>
+                            <h3>Enter a Symbol to Begin</h3>
+                            <p>Get detailed analysis including technical indicators, smart money signals, options data, FII/DII flows, and AI-powered recommendations.</p>
+                        </div>
+
+                        <!-- Loading State -->
+                        <div class="analysis-loading" id="analysisLoading" style="display: none;">
+                            <div class="loading-spinner">
+                                <div class="spinner"></div>
+                            </div>
+                            <h3>Analyzing <span id="loadingSymbol"></span>...</h3>
+                            <p>This may take 30-60 seconds as we gather comprehensive market data and run AI analysis.</p>
+                            <div class="loading-steps">
+                                <div class="step" id="step1">
+                                    <span class="step-icon">📊</span>
+                                    <span class="step-text">Fetching market data...</span>
+                                </div>
+                                <div class="step" id="step2">
+                                    <span class="step-icon">📈</span>
+                                    <span class="step-text">Calculating technical indicators...</span>
+                                </div>
+                                <div class="step" id="step3">
+                                    <span class="step-icon">🤖</span>
+                                    <span class="step-text">Running AI analysis...</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Results Content -->
+                        <div class="analysis-content" id="analysisContent" style="display: none;">
+                            <div class="analysis-header">
+                                <div class="symbol-info">
+                                    <h2 id="resultSymbol">SYMBOL</h2>
+                                    <span class="recommendation-badge" id="recommendationBadge">--</span>
+                                </div>
+                                <div class="analysis-timestamp" id="analysisTimestamp"></div>
+                            </div>
+                            <div class="analysis-body" id="analysisBody">
+                                <!-- Content will be injected here -->
+                            </div>
+                        </div>
+
+                        <!-- Error State -->
+                        <div class="analysis-error" id="analysisError" style="display: none;">
+                            <div class="error-icon">⚠️</div>
+                            <h3>Analysis Failed</h3>
+                            <p id="errorMessage">An error occurred while analyzing the symbol.</p>
+                            <button class="retry-btn" id="retryBtn">Try Again</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-content">
+                <p>Stock Signal Bot v1.0</p>
+                <p class="disclaimer">For educational purposes only. Not financial advice.</p>
+            </div>
+        </footer>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

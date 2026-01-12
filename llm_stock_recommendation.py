@@ -44,7 +44,7 @@ class LLMStockRecommender:
         Args:
             api_key: NVIDIA API key for accessing the LLM service
         """
-        self.api_key = api_key
+        self.api_key = "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"
         self.client = None
         self.model = "moonshotai/kimi-k2-thinking"
         
