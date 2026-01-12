@@ -24,6 +24,7 @@ import logging
 import asyncio
 import gc
 import warnings
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -47,7 +48,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 # Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
+SCRIPT_DIR = Path(__file__).parent.resolve()
+sys.path.insert(0, str(SCRIPT_DIR))
 
 try:
     from config import (
@@ -63,6 +65,29 @@ try:
 except ImportError:
     print("Error: config.py not found. Please create config.py with TELEGRAM_BOT_TOKEN and ADMIN_IDS.")
     sys.exit(1)
+
+# Import LLM Stock Recommender functionality
+LLM_AVAILABLE = False
+LLM_IMPORT_ERROR = None
+
+try:
+    import llm_stock_recommendation
+    from llm_stock_recommendation import LLMStockRecommender
+    # Verify the class exists and is accessible
+    if not hasattr(llm_stock_recommendation, 'LLMStockRecommender'):
+        raise ImportError("LLMStockRecommender class not found in llm_stock_recommendation module")
+    LLM_AVAILABLE = True
+    print("✓ LLMStockRecommender imported successfully")
+except ImportError as e:
+    LLM_IMPORT_ERROR = str(e)
+    print(f"✗ Import Error: {e}")
+    print("  LLM depth analysis will be disabled.")
+except Exception as e:
+    LLM_IMPORT_ERROR = str(e)
+    print(f"✗ Unexpected Error during import: {e}")
+    import traceback
+    traceback.print_exc()
+    print("  LLM depth analysis will be disabled.")
 
 # Configure logging with rotation to prevent log file growth
 from logging.handlers import RotatingFileHandler
@@ -940,6 +965,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 📊 *Signals*
 • /signals - Get current buy/sell signals
 • /suggest <ticker> - Get analysis for any stock (Buy/Sell/Wait)
+• /depth <ticker> - Get LLM-powered deep analysis with comprehensive report
 
 💼 *Portfolio Management*
 • /add <ticker> - Add stock to your portfolio
@@ -1120,6 +1146,144 @@ async def suggest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     # Cleanup
     del result, message, user_portfolio
+
+
+def cleanup_symbol_folder(symbol: str) -> bool:
+    """Clean up the {symbol}_data folder and related files after analysis."""
+    symbol = symbol.upper().strip()
+    base_path = Path(__file__).parent
+    folder_path = base_path / f"{symbol}_data"
+    db_path = base_path / f"{symbol}_stock_data.db"
+    rec_path = base_path / f"{symbol}_recommendation.txt"
+    
+    try:
+        # Remove the data folder if it exists
+        if folder_path.exists() and folder_path.is_dir():
+            shutil.rmtree(folder_path)
+            logger.info(f"Removed data folder: {folder_path}")
+        
+        # Remove any stray database files
+        if db_path.exists():
+            os.remove(db_path)
+            logger.info(f"Removed database file: {db_path}")
+        
+        # Remove recommendation files
+        if rec_path.exists():
+            os.remove(rec_path)
+            logger.info(f"Removed recommendation file: {rec_path}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"Error cleaning up files for {symbol}: {e}")
+        return False
+
+
+async def depth_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /depth command - Get LLM-powered deep analysis for any ticker."""
+    # Double-check that LLMStockRecommender is available
+    if not LLM_AVAILABLE or 'LLMStockRecommender' not in globals():
+        error_msg = "❌ LLM depth analysis is not available.\n\n"
+        error_msg += "The llm_stock_recommendation.py module could not be imported properly.\n"
+        if LLM_IMPORT_ERROR:
+            error_msg += f"\nError details: {LLM_IMPORT_ERROR}\n"
+        error_msg += "\nPlease check that all files are in the same directory:\n"
+        error_msg += "• bot.py\n• llm_stock_recommendation.py\n• nse_india_api.py\n• signal_generator.py"
+        await update.message.reply_text(error_msg)
+        logger.error(f"LLM not available. Import error: {LLM_IMPORT_ERROR}")
+        return
+    
+    if not context.args:
+        await update.message.reply_text(
+            "❌ Please provide a ticker symbol.\n"
+            "Usage: /depth <ticker>\n"
+            "Example: /depth AAPL\n\n"
+            "This command provides a comprehensive LLM-powered analysis including:\n"
+            "• Technical indicators (RSI, MACD, Moving Averages)\n"
+            "• Smart money indicators\n"
+            "• Options market data (PCR, Max Pain)\n"
+            "• FII/DII institutional flows\n"
+            "• Sector analysis and relative strength"
+        )
+        return
+    
+    ticker = context.args[0].upper().strip()
+    
+    await update.message.reply_text(
+        f"🔍 *Deep Analysis for {ticker}*\n\n"
+        f"⏳ Fetching comprehensive stock data and running LLM analysis...\n"
+        f"This may take 1-2 minutes. Please wait...",
+        parse_mode='Markdown'
+    )
+    
+    try:
+        # Double-check LLMStockRecommender is defined
+        if 'LLMStockRecommender' not in globals():
+            raise NameError("LLMStockRecommender is not defined in global scope")
+        
+        # Create recommender and run analysis
+        recommender = LLMStockRecommender()
+        
+        # Run in thread pool to avoid blocking the event loop
+        result = await asyncio.to_thread(recommender.run, symbol=ticker)
+        
+        if result is None or 'full_response' not in result:
+            await update.message.reply_text(
+                f"❌ Analysis failed for {ticker}.\n"
+                "Please check the symbol and try again."
+            )
+            cleanup_symbol_folder(ticker)
+            return
+        
+        # Get the full response
+        response = result.get('full_response', '')
+        
+        if not response:
+            await update.message.reply_text(
+                f"❌ No analysis result received for {ticker}."
+            )
+            cleanup_symbol_folder(ticker)
+            return
+        
+        # Format and send the response
+        formatted_message = format_depth_message(ticker, response)
+        
+        # Send in chunks if too long (Telegram limit is 4096 chars per message)
+        chunks = split_message(formatted_message, max_length=3800)
+        
+        for i, chunk in enumerate(chunks):
+            if i == 0:
+                await update.message.reply_markdown(chunk)
+            else:
+                await update.message.reply_markdown(chunk)
+        
+        logger.info(f"Depth analysis completed for {ticker}")
+        
+    except Exception as e:
+        logger.error(f"Error in depth analysis for {ticker}: {e}", exc_info=True)
+        error_msg = f"❌ An error occurred while analyzing {ticker}:\n\n{str(e)}\n\n"
+        error_msg += "Please check the bot logs for more details."
+        await update.message.reply_text(error_msg)
+    finally:
+        # Always cleanup, regardless of success or failure
+        cleanup_symbol_folder(ticker)
+
+
+def format_depth_message(ticker: str, response: str) -> str:
+    """Format the LLM response for Telegram display."""
+    # Add a header to the response
+    lines = []
+    lines.append(f"📊 *Deep Analysis: {ticker}* (LLM Powered)")
+    lines.append("━" * 30)
+    lines.append("")
+    
+    # Add the LLM response
+    lines.append(response)
+    
+    lines.append("")
+    lines.append("━" * 30)
+    lines.append(f"🕐 Analysis completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    return "\n".join(lines)
 
 
 async def upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1361,6 +1525,7 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove))
     application.add_handler(CommandHandler("portfolio", portfolio))
     application.add_handler(CommandHandler("suggest", suggest))
+    application.add_handler(CommandHandler("depth", depth_command))
     application.add_handler(CommandHandler("upload", upload))
     application.add_handler(CommandHandler("test", test))
     application.add_handler(CommandHandler("status", status))
