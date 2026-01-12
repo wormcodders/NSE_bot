@@ -3,12 +3,13 @@
 Stock Signal Bot - Automated Buy/Sell Signal Scanner with Telegram Notifications
 
 Enhanced Features:
-- each user
-- SQLite database for persistent Personal portfolio management for storage
+- Telegram bot for buy/sell signal notifications
+- SQLite database for persistent portfolio management
 - /add and /remove commands for portfolio management
 - /portfolio command to view holdings with recommendations
 - /suggest command for on-demand ticker analysis
 - HOLD signal when ticker doesn't meet buy/sell criteria
+- Built-in Web Dashboard for live signals and depth analysis
 
 Author: MiniMax Agent
 """
@@ -46,6 +47,15 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+
+# Flask imports for built-in web dashboard
+try:
+    from flask import Flask, render_template, jsonify, request, Response
+    from flask_cors import CORS
+    FLASK_AVAILABLE = True
+except ImportError:
+    FLASK_AVAILABLE = False
+    print("Warning: Flask not installed. Web dashboard will be disabled.")
 
 # Add parent directory to path for imports
 SCRIPT_DIR = Path(__file__).parent.resolve()
@@ -117,6 +127,16 @@ test_mode = False
 
 # Store application reference for handlers
 _bot_application = None
+
+# Web dashboard configuration
+WEB_DATA_DIR = Path(__file__).parent / "web_data"
+WEB_DATA_DIR.mkdir(exist_ok=True)
+SIGNALS_FILE = WEB_DATA_DIR / "signals_history.json"
+CURRENT_SIGNALS_FILE = WEB_DATA_DIR / "current_signals.json"
+
+# Flask app initialization (lazy initialization)
+_flask_app = None
+_flask_thread = None
 
 
 # ==================== DATABASE FUNCTIONS ====================
@@ -424,6 +444,239 @@ def load_tickers() -> List[str]:
     except Exception as e:
         logger.error(f"Error loading tickers: {e}")
         return []
+
+
+# ==================== WEB DASHBOARD FUNCTIONS ====================
+
+def save_signals_for_web(
+    buy_signals: List[dict], 
+    sell_signals: List[dict], 
+    summary: dict,
+    scheduled_time: str = None
+) -> bool:
+    """
+    Save signals to JSON file for web dashboard display.
+    Only saves market signals (buy/sell), NOT portfolio info.
+    
+    Args:
+        buy_signals: List of buy signal dictionaries
+        sell_signals: List of sell signal dictionaries
+        summary: Analysis summary dictionary
+        scheduled_time: The scheduled time when analysis ran (e.g., "9:30")
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        # Get current time
+        timestamp = datetime.now().isoformat()
+        
+        # Format time for display
+        if not scheduled_time:
+            scheduled_time = datetime.now().strftime("%H:%M")
+        
+        # Create clean signal data (no portfolio info)
+        signal_data = {
+            "timestamp": timestamp,
+            "scheduled_time": scheduled_time,
+            "market_scan": {
+                "total_tickers": summary.get("total_tickers", 0),
+                "analyzed": summary.get("analyzed", 0),
+                "errors": summary.get("errors", 0),
+                "execution_time": summary.get("execution_time", 0)
+            },
+            "buy_signals": [
+                {
+                    "ticker": s.get("ticker", ""),
+                    "signal": s.get("signal", "BUY"),
+                    "price": s.get("current_price", 0),
+                    "rsi": s.get("current_rsi", 0),
+                    "macd": s.get("current_macd", 0),
+                    "signal_line": s.get("current_signal", 0),
+                    "histogram": s.get("macd_histogram", 0),
+                    "crossover_type": s.get("crossover_type", None)
+                }
+                for s in buy_signals
+            ],
+            "sell_signals": [
+                {
+                    "ticker": s.get("ticker", ""),
+                    "signal": s.get("signal", "SELL"),
+                    "price": s.get("current_price", 0),
+                    "rsi": s.get("current_rsi", 0),
+                    "macd": s.get("current_macd", 0),
+                    "signal_line": s.get("current_signal", 0),
+                    "histogram": s.get("macd_histogram", 0),
+                    "crossover_type": s.get("crossover_type", None)
+                }
+                for s in sell_signals
+            ]
+        }
+        
+        # Save to current signals file
+        with open(CURRENT_SIGNALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(signal_data, f, indent=2, ensure_ascii=False)
+        
+        # Also update history
+        _update_signals_history(signal_data)
+        
+        logger.info(f"Signals saved for web: {len(buy_signals)} buy, {len(sell_signals)} sell")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error saving signals for web: {e}")
+        return False
+
+
+def _update_signals_history(new_signal_data: dict) -> None:
+    """Update the signals history file with new data."""
+    try:
+        history = {"signals_history": [], "last_updated": None}
+        
+        # Load existing history if exists
+        if SIGNALS_FILE.exists():
+            with open(SIGNALS_FILE, 'r', encoding='utf-8') as f:
+                try:
+                    history = json.load(f)
+                except json.JSONDecodeError:
+                    history = {"signals_history": [], "last_updated": None}
+        
+        # Add new signal data
+        history["signals_history"].insert(0, new_signal_data)
+        
+        # Keep only last 100 entries
+        history["signals_history"] = history["signals_history"][:100]
+        
+        # Update timestamp
+        history["last_updated"] = datetime.now().isoformat()
+        
+        # Save
+        with open(SIGNALS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, indent=2, ensure_ascii=False)
+            
+    except Exception as e:
+        logger.error(f"Error updating signals history: {e}")
+
+
+def get_current_signals() -> dict:
+    """
+    Get current signals for web dashboard.
+    
+    Returns:
+        Dictionary with current signal data or empty structure
+    """
+    try:
+        if CURRENT_SIGNALS_FILE.exists():
+            with open(CURRENT_SIGNALS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error reading current signals: {e}")
+    
+    # Return empty structure
+    return {
+        "timestamp": None,
+        "scheduled_time": None,
+        "market_scan": {
+            "total_tickers": 0,
+            "analyzed": 0,
+            "errors": 0,
+            "execution_time": 0
+        },
+        "buy_signals": [],
+        "sell_signals": []
+    }
+
+
+def get_signals_history(limit: int = 20) -> list:
+    """
+    Get historical signals for the web dashboard.
+    
+    Args:
+        limit: Maximum number of history entries to return
+    
+    Returns:
+        List of historical signal entries
+    """
+    try:
+        if SIGNALS_FILE.exists():
+            with open(SIGNALS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get("signals_history", [])[:limit]
+    except Exception as e:
+        logger.error(f"Error reading signals history: {e}")
+    
+    return []
+
+
+def format_signals_for_web(buy_signals: List[dict], sell_signals: List[dict]) -> str:
+    """
+    Format signals as HTML for web display.
+    
+    Args:
+        buy_signals: List of buy signal dictionaries
+        sell_signals: List of sell signal dictionaries
+    
+    Returns:
+        HTML string for displaying signals
+    """
+    html_parts = []
+    
+    # Buy Signals Section
+    if buy_signals:
+        html_parts.append('<div class="signal-section">')
+        html_parts.append('<h3 class="section-title buy-title">🟢 BUY SIGNALS</h3>')
+        html_parts.append('<div class="signal-grid">')
+        
+        for signal in sorted(buy_signals, key=lambda x: x.get('ticker', '')):
+            html_parts.append(f'''
+                <div class="signal-card buy">
+                    <div class="signal-header">
+                        <span class="ticker">{signal.get('ticker', '')}</span>
+                        <span class="signal-badge buy">BUY</span>
+                    </div>
+                    <div class="signal-price">₹{signal.get('price', 0):.2f}</div>
+                    <div class="signal-indicators">
+                        <span class="indicator">RSI: {signal.get('rsi', 0):.1f}</span>
+                        <span class="indicator">MACD: {signal.get('histogram', 0):+.4f}</span>
+                    </div>
+                </div>
+            ''')
+        
+        html_parts.append('</div></div>')
+    
+    # Sell Signals Section
+    if sell_signals:
+        html_parts.append('<div class="signal-section">')
+        html_parts.append('<h3 class="section-title sell-title">🔴 SELL SIGNALS</h3>')
+        html_parts.append('<div class="signal-grid">')
+        
+        for signal in sorted(sell_signals, key=lambda x: x.get('ticker', '')):
+            html_parts.append(f'''
+                <div class="signal-card sell">
+                    <div class="signal-header">
+                        <span class="ticker">{signal.get('ticker', '')}</span>
+                        <span class="signal-badge sell">SELL</span>
+                    </div>
+                    <div class="signal-price">₹{signal.get('price', 0):.2f}</div>
+                    <div class="signal-indicators">
+                        <span class="indicator">RSI: {signal.get('rsi', 0):.1f}</span>
+                        <span class="indicator">MACD: {signal.get('histogram', 0):+.4f}</span>
+                    </div>
+                </div>
+            ''')
+        
+        html_parts.append('</div></div>')
+    
+    # No Signals
+    if not buy_signals and not sell_signals:
+        html_parts.append('''
+            <div class="no-signals">
+                <p>No buy or sell signals generated in this scan.</p>
+                <p>The market may be in a consolidation phase.</p>
+            </div>
+        ''')
+    
+    return '\n'.join(html_parts)
 
 
 def run_analysis() -> Tuple[List[dict], List[dict], dict]:
@@ -737,6 +990,10 @@ async def scheduled_analysis(application: Application) -> None:
     
     # Run market-wide analysis
     buy_signals, sell_signals, summary = run_analysis()
+    
+    # Save signals for web dashboard (only market signals, no portfolio info)
+    save_signals_for_web(buy_signals, sell_signals, summary)
+    
     market_message = format_signal_message(buy_signals, sell_signals, summary, is_test=False)
     
     # Free memory from analysis results after formatting
@@ -1496,10 +1753,291 @@ def setup_scheduler(application: Application) -> BackgroundScheduler:
     return scheduler
 
 
+# ==================== WEB DASHBOARD ROUTES ====================
+
+# Global variables for depth analysis
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+_web_executor = ThreadPoolExecutor(max_workers=2)
+_web_active_analysis = {}
+_web_analysis_lock = threading.Lock()
+
+
+def _create_flask_app() -> Flask:
+    """Create and configure the Flask web application."""
+    app = Flask(__name__, 
+        template_folder='templates',
+        static_folder='static'
+    )
+    CORS(app)
+    
+    @app.route('/')
+    def index():
+        """Render the main dashboard page."""
+        return render_template('index.html', 
+                              llm_available=LLM_AVAILABLE,
+                              web_integration=True)
+    
+    @app.route('/api/signals')
+    def api_signals():
+        """API endpoint to get current signals."""
+        signals_data = get_current_signals()
+        return jsonify(signals_data)
+    
+    @app.route('/api/signals/history')
+    def api_signals_history():
+        """API endpoint to get signal history."""
+        limit = request.args.get('limit', 20, type=int)
+        history = get_signals_history(limit=limit)
+        return jsonify({"history": history})
+    
+    @app.route('/api/signals/html')
+    def api_signals_html():
+        """API endpoint to get signals as rendered HTML."""
+        signals_data = get_current_signals()
+        buy_signals = signals_data.get('buy_signals', [])
+        sell_signals = signals_data.get('sell_signals', [])
+        html = format_signals_for_web(buy_signals, sell_signals)
+        return Response(
+            html,
+            mimetype='text/html',
+            headers={'Cache-Control': 'no-cache'}
+        )
+    
+    @app.route('/api/depth', methods=['POST'])
+    def api_depth_analysis():
+        """API endpoint for depth analysis."""
+        data = request.get_json()
+        
+        if not data or 'symbol' not in data:
+            return jsonify({
+                "error": "Missing required parameter: symbol",
+                "status": "error"
+            }), 400
+        
+        symbol = data.get('symbol', '').strip().upper()
+        
+        if not symbol:
+            return jsonify({
+                "error": "Invalid symbol provided",
+                "status": "error"
+            }), 400
+        
+        # Check if LLM is available
+        if not LLM_AVAILABLE:
+            error_msg = "LLM depth analysis is not available."
+            return jsonify({
+                "error": error_msg,
+                "status": "error",
+                "symbol": symbol
+            }), 503
+        
+        # Check if analysis is already running for this symbol
+        task_id = f"{symbol}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        with _web_analysis_lock:
+            if symbol in _web_active_analysis:
+                future = _web_active_analysis[symbol]
+                if not future.done():
+                    return jsonify({
+                        "message": f"Analysis for {symbol} is already in progress",
+                        "status": "processing",
+                        "symbol": symbol
+                    })
+            
+            # Start new analysis task
+            future = _web_executor.submit(_run_depth_analysis, symbol)
+            _web_active_analysis[symbol] = future
+            task_id = symbol
+        
+        return jsonify({
+            "message": f"Analysis started for {symbol}",
+            "status": "processing",
+            "symbol": symbol,
+            "task_id": task_id
+        })
+    
+    @app.route('/api/depth/result/<task_id>')
+    def api_depth_result(task_id):
+        """API endpoint to get depth analysis result."""
+        symbol = task_id.split('_')[0] if '_' in task_id else task_id
+        
+        with _web_analysis_lock:
+            if symbol in _web_active_analysis:
+                future = _web_active_analysis[symbol]
+                
+                if future.done():
+                    try:
+                        result = future.result(timeout=5)
+                        del _web_active_analysis[symbol]
+                        return jsonify(result)
+                    except Exception as e:
+                        del _web_active_analysis[symbol]
+                        return jsonify({
+                            "error": str(e),
+                            "status": "error",
+                            "symbol": symbol
+                        }), 500
+                else:
+                    return jsonify({
+                        "status": "processing",
+                        "symbol": symbol,
+                        "message": "Analysis in progress... please wait"
+                    })
+            else:
+                return jsonify({
+                    "error": "Task not found",
+                    "status": "error",
+                    "task_id": task_id
+                }), 404
+    
+    @app.route('/api/depth/sync', methods=['POST'])
+    def api_depth_analysis_sync():
+        """Synchronous depth analysis endpoint."""
+        data = request.get_json()
+        
+        if not data or 'symbol' not in data:
+            return jsonify({
+                "error": "Missing required parameter: symbol",
+                "status": "error"
+            }), 400
+        
+        symbol = data.get('symbol', '').strip().upper()
+        
+        if not symbol:
+            return jsonify({
+                "error": "Invalid symbol provided",
+                "status": "error"
+            }), 400
+        
+        if not LLM_AVAILABLE:
+            error_msg = "LLM depth analysis is not available."
+            return jsonify({
+                "error": error_msg,
+                "status": "error",
+                "symbol": symbol
+            }), 503
+        
+        try:
+            result = _run_depth_analysis(symbol)
+            return jsonify(result)
+        except Exception as e:
+            logger.error(f"Error in depth analysis: {e}")
+            return jsonify({
+                "error": str(e),
+                "status": "error",
+                "symbol": symbol
+            }), 500
+    
+    @app.route('/api/status')
+    def api_status():
+        """API endpoint to get system status."""
+        return jsonify({
+            "status": "online",
+            "llm_available": LLM_AVAILABLE,
+            "web_integration": True,
+            "timestamp": datetime.now().isoformat(),
+            "version": "1.0.0"
+        })
+    
+    @app.route('/health')
+    def health_check():
+        """Health check endpoint for monitoring."""
+        return jsonify({
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat()
+        })
+    
+    return app
+
+
+def _run_depth_analysis(symbol: str) -> dict:
+    """Run depth analysis for a symbol."""
+    try:
+        if 'LLMStockRecommender' not in globals():
+            return {
+                "status": "error",
+                "symbol": symbol,
+                "error": "LLMStockRecommender not available"
+            }
+        
+        recommender = LLMStockRecommender()
+        result = recommender.run(symbol=symbol)
+        
+        if result and 'full_response' in result:
+            return {
+                "status": "success",
+                "symbol": symbol,
+                "recommendation": result.get('recommendation', 'NEUTRAL'),
+                "analysis": result.get('full_response', ''),
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "symbol": symbol,
+                "error": "Analysis failed to produce results",
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    except Exception as e:
+        logger.error(f"Depth analysis error for {symbol}: {e}")
+        return {
+            "status": "error",
+            "symbol": symbol,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+def _run_flask_server():
+    """Run the Flask web server in a blocking manner."""
+    global _flask_app
+    
+    if not FLASK_AVAILABLE:
+        logger.warning("Flask not available. Web dashboard will not start.")
+        return
+    
+    try:
+        _flask_app = _create_flask_app()
+        logger.info("Starting web dashboard server on port 5000...")
+        _flask_app.run(
+            host='0.0.0.0',
+            port=5000,
+            debug=False,
+            threaded=True,
+            use_reloader=False
+        )
+    except Exception as e:
+        logger.error(f"Error starting web server: {e}")
+
+
+def start_web_dashboard() -> threading.Thread:
+    """Start the web dashboard in a background thread."""
+    if not FLASK_AVAILABLE:
+        logger.warning("Flask not installed. Web dashboard cannot be started.")
+        return None
+    
+    web_thread = threading.Thread(
+        target=_run_flask_server,
+        name="FlaskWebServer",
+        daemon=True
+    )
+    web_thread.start()
+    logger.info("Web dashboard thread started")
+    return web_thread
+
+
 # ==================== MAIN ====================
 
 def main() -> None:
     """Main entry point."""
+    print("="*60)
+    print("Stock Signal Bot with Web Dashboard")
+    print("="*60)
+    print()
+    
     logger.info("Starting Stock Signal Bot")
     
     # Initialize database
@@ -1539,14 +2077,31 @@ def main() -> None:
     # Setup scheduler
     scheduler = setup_scheduler(application)
     
+    # Print status
+    print(f"Telegram Bot: ✓ Running")
+    print(f"LLM Depth Analysis: {'✓ Available' if LLM_AVAILABLE else '✗ Not Available'}")
+    print(f"Web Dashboard: {'✓ Enabled (Port 5000)' if FLASK_AVAILABLE else '✗ Disabled (Flask not installed)'}")
+    print()
+    
+    # Start web dashboard in background thread
+    if FLASK_AVAILABLE:
+        web_thread = start_web_dashboard()
+        print(f"Web Dashboard: http://localhost:5000")
+        print()
+    else:
+        print("Web Dashboard: ⚠️ Flask not installed. Install with: pip install flask flask-cors")
+        print()
+    
     # Run the bot
-    logger.info("Bot is ready. Press Ctrl+C to stop.")
+    print("Bot is ready. Press Ctrl+C to stop.")
+    print("="*60)
     
     try:
         application.run_polling(allowed_updates=Update.ALL_TYPES)
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
         scheduler.shutdown()
+        _web_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":
