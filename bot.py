@@ -2092,16 +2092,55 @@ def main() -> None:
         print("Web Dashboard: ⚠️ Flask not installed. Install with: pip install flask flask-cors")
         print()
     
-    # Run the bot
+    # Run the bot with error handling
     print("Bot is ready. Press Ctrl+C to stop.")
     print("="*60)
     
+    run_bot_with_error_handling(application, scheduler)
+
+
+def run_bot_with_error_handling(application: Application, scheduler: BackgroundScheduler) -> None:
+    """Run the bot with proper error handling and restart logic."""
+    from telegram.error import Conflict
+    import time
+    
+    max_retries = 3
+    retry_delay = 5  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Starting bot polling (attempt {attempt + 1}/{max_retries})")
+            application.run_polling(
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=True  # Important: drops old updates to avoid conflicts
+            )
+        except Conflict as e:
+            logger.error(f"Telegram Conflict error: {e}")
+            if "terminated by other getUpdates request" in str(e):
+                logger.warning("Another bot instance is running. Waiting for it to terminate...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                logger.error(f"Unknown Conflict error: {e}")
+                break
+        except KeyboardInterrupt:
+            logger.info("Keyboard interrupt received, shutting down...")
+            break
+        except SystemExit:
+            logger.info("System exit received, shutting down...")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error: {e}", exc_info=True)
+            break
+    
+    # Cleanup on exit
+    logger.info("Shutting down bot...")
     try:
-        application.run_polling(allowed_updates=Update.ALL_TYPES)
-    except (KeyboardInterrupt, SystemExit):
-        logger.info("Shutting down...")
-        scheduler.shutdown()
-        _web_executor.shutdown(wait=False)
+        scheduler.shutdown(wait=False)
+        if '_web_executor' in globals():
+            _web_executor.shutdown(wait=False)
+    except Exception as e:
+        logger.error(f"Error during shutdown: {e}")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,8 @@ class SignalGenerator:
         if row and row['json_data']:
             try:
                 return json.loads(row['json_data'])
-            except:
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                print(f"  Warning: Failed to parse JSON for {symbol}/{data_type}: {e}")
                 return None
         return None
     
@@ -1178,7 +1179,7 @@ class SignalGenerator:
         ''', (symbol.upper(),))
         
         rows = cursor.fetchall()
-        if len(rows) < 10:
+        if not rows or len(rows) < 10:
             return signals
         
         # Get current stock price
@@ -1593,7 +1594,7 @@ class SignalGenerator:
         ''', (symbol.upper(),))
         
         rows = cursor.fetchall()
-        if len(rows) < 5:
+        if not rows or len(rows) < 5:
             return signals
         
         # Get spot price for premium/discount calculation
@@ -1604,21 +1605,31 @@ class SignalGenerator:
         spot_row = cursor.fetchone()
         
         # Find current spot from strike range if raw price is bonus-adjusted
-        all_futures_prices = [r[5] for r in rows if r[5]]
-        if all_futures_prices:
-            avg_futures = np.mean(all_futures_prices[-10:])
-            if spot_row and spot_row[0]:
-                raw_spot = spot_row[0]
-                # Check if spot is in similar range as futures
-                if avg_futures * 0.5 <= raw_spot <= avg_futures * 2:
-                    spot_price = raw_spot
-                else:
-                    # Futures are on adjusted prices, estimate spot
-                    spot_price = all_futures_prices[-1] * 0.995  # Approximate
-            else:
-                spot_price = all_futures_prices[-1] * 0.995
-        else:
+        all_futures_prices = []
+        for r in rows:
+            if not r or len(r) < 6:
+                continue
+            try:
+                price = float(r[5])
+                if price and price > 0:
+                    all_futures_prices.append(price)
+            except (TypeError, ValueError):
+                continue
+        
+        if not all_futures_prices:
             return signals
+        
+        avg_futures = np.mean(all_futures_prices[-10:])
+        spot_price = all_futures_prices[-1] * 0.995  # Default estimate
+        
+        if spot_row and spot_row[0]:
+            raw_spot = spot_row[0]
+            # Check if spot is in similar range as futures
+            if avg_futures * 0.5 <= raw_spot <= avg_futures * 2:
+                spot_price = raw_spot
+            else:
+                # Futures are on adjusted prices, estimate spot
+                spot_price = all_futures_prices[-1] * 0.995  # Approximate
         
         signals["available"] = True
         signals["spot_price_ref"] = round(spot_price, 2)
@@ -1628,6 +1639,8 @@ class SignalGenerator:
         expiry_data = {}
         
         for row in rows:
+            if not row or len(row) < 9:
+                continue
             trade_date, expiry_date, open_p, high, low, close, vol, oi, chg_oi = row
             
             if expiry_date not in expiry_data:
@@ -5819,7 +5832,10 @@ class SignalGenerator:
         
         # Handle dict wrapper (NSE format: {resCmpData: [...], bankNonBnking: ...})
         if isinstance(results, dict):
-            results = results.get("resCmpData", results.get("data", []))
+            # Safely get the results list with multiple fallbacks
+            res_cmp_data = results.get("resCmpData") if isinstance(results.get("resCmpData"), list) else None
+            data_field = results.get("data") if isinstance(results.get("data"), list) else None
+            results = res_cmp_data or data_field or []
         
         if not isinstance(results, list) or len(results) < 2:
             return signals
@@ -5835,17 +5851,78 @@ class SignalGenerator:
                 if val is None or val == '' or val == '-':
                     return 0.0
                 return float(str(val).replace(',', ''))
-            except:
+            except (ValueError, TypeError):
                 return 0.0
         
-        net_sales = [safe_float(q.get('re_net_sale', q.get('re_net_sales', q.get('net_sales', 0)))) for q in quarters]
-        net_profit = [safe_float(q.get('re_con_pro_loss', q.get('re_pro_loss_ord_act_tax', q.get('net_profit', 0)))) for q in quarters]
-        eps = [safe_float(q.get('re_diluted_eps', q.get('re_basic_eps_for_cont_dic_opr', q.get('eps', 0)))) for q in quarters]
-        total_expenses = [safe_float(q.get('re_tot_exp_exc_pro_cont', q.get('re_total_expenses', 0))) for q in quarters]
-        operating_income = [safe_float(q.get('re_income_inv', 0)) + safe_float(q.get('re_net_sale', 0)) for q in quarters]
+        # Safely extract metrics with multiple fallback keys
+        net_sales = []
+        net_profit = []
+        eps = []
+        
+        for q in quarters:
+            if not isinstance(q, dict):
+                net_sales.append(0.0)
+                net_profit.append(0.0)
+                eps.append(0.0)
+                continue
+            
+            # Net sales with multiple key fallbacks
+            ns = safe_float(q.get('re_net_sale'))
+            if ns == 0:
+                ns = safe_float(q.get('re_net_sales'))
+            if ns == 0:
+                ns = safe_float(q.get('net_sales'))
+            net_sales.append(ns)
+            
+            # Net profit with multiple key fallbacks
+            np_val = safe_float(q.get('re_con_pro_loss'))
+            if np_val == 0:
+                np_val = safe_float(q.get('re_pro_loss_ord_act_tax'))
+            if np_val == 0:
+                np_val = safe_float(q.get('net_profit'))
+            net_profit.append(np_val)
+            
+            # EPS with multiple key fallbacks
+            eps_val = safe_float(q.get('re_diluted_eps'))
+            if eps_val == 0:
+                eps_val = safe_float(q.get('re_basic_eps_for_cont_dic_opr'))
+            if eps_val == 0:
+                eps_val = safe_float(q.get('eps'))
+            eps.append(eps_val)
+        total_expenses = []
+        operating_income = []
+        tax = []
+        pbt = []
+        
+        for i, q in enumerate(quarters):
+            if not isinstance(q, dict):
+                total_expenses.append(0.0)
+                operating_income.append(0.0)
+                tax.append(0.0)
+                pbt.append(0.0)
+                continue
+            
+            # Total expenses
+            te = safe_float(q.get('re_tot_exp_exc_pro_cont'))
+            if te == 0:
+                te = safe_float(q.get('re_total_expenses'))
+            total_expenses.append(te)
+            
+            # Operating income
+            oi = safe_float(q.get('re_income_inv', 0))
+            ns_val = safe_float(q.get('re_net_sale', 0))
+            operating_income.append(oi + ns_val)
+            
+            # Tax
+            tax.append(safe_float(q.get('re_deff_tax', 0)))
+            
+            # PBT (Profit Before Tax)
+            pbt_val = safe_float(q.get('re_pro_loss_bfr_tax'))
+            if pbt_val == 0:
+                pbt_val = net_profit[i] + tax[i]
+            pbt.append(pbt_val)
+        
         operating_profit = [operating_income[i] - total_expenses[i] for i in range(len(quarters))]
-        tax = [safe_float(q.get('re_deff_tax', 0)) for q in quarters]
-        pbt = [safe_float(q.get('re_pro_loss_bfr_tax', net_profit[i] + tax[i])) for i, q in enumerate(quarters)]
         
         # 1. Earnings & Profitability
         # QoQ growth
@@ -5980,7 +6057,7 @@ class SignalGenerator:
                 if val is None or val == '' or val == '-':
                     return 0.0
                 return float(str(val).replace(',', '').replace('%', ''))
-            except:
+            except (ValueError, TypeError):
                 return 0.0
         
         # Handle IndianAPI structure: {metric_name: {quarter: value, ...}, ...}
@@ -6004,16 +6081,18 @@ class SignalGenerator:
         tax_pct = extract_metric('Tax %')
         net_profit = extract_metric('Net Profit')
         
-        if len(sales) < 2:
+        if not sales or len(sales) < 2:
             return signals
         
         signals["available"] = True
         
         # 1. Growth & Trend
         # Revenue CAGR (if enough data)
-        if len(sales) >= 4 and sales[-1] > 0 and sales[0] > 0:
-            cagr_periods = len(sales) - 1
-            revenue_cagr = ((sales[0] / sales[-1]) ** (4 / cagr_periods) - 1) * 100
+        # Filter out zero/negative values for CAGR calculation
+        valid_sales = [s for s in sales if s and s > 0]
+        if len(valid_sales) >= 4 and valid_sales[-1] > 0 and valid_sales[0] > 0:
+            cagr_periods = len(valid_sales) - 1
+            revenue_cagr = ((valid_sales[0] / valid_sales[-1]) ** (4 / cagr_periods) - 1) * 100
         else:
             revenue_cagr = 0
         
@@ -6082,7 +6161,7 @@ class SignalGenerator:
         details = self._get_layer1_json(symbol, "stock_details_indianapi")
         signals = {"available": False}
         
-        if not details:
+        if not details or not isinstance(details, dict):
             return signals
         
         signals["available"] = True
@@ -6092,23 +6171,28 @@ class SignalGenerator:
                 if val is None or val == '' or val == '-':
                     return 0.0
                 return float(str(val).replace(',', ''))
-            except:
+            except (ValueError, TypeError):
                 return 0.0
         
         def extract_metric(metrics_list, key_contains):
             """Extract value from keyMetrics list by key substring"""
-            if not metrics_list:
+            if not metrics_list or not isinstance(metrics_list, list):
                 return None
             for item in metrics_list:
-                if key_contains.lower() in item.get("key", "").lower():
+                if not isinstance(item, dict):
+                    continue
+                item_key = item.get("key", "")
+                if item_key and key_contains.lower() in item_key.lower():
                     return safe_float(item.get("value"))
             return None
         
         # 1. Analyst Recommendations
         analyst_view = details.get("analystView", [])
-        if analyst_view:
+        if analyst_view and isinstance(analyst_view, list):
             ratings = {}
             for av in analyst_view:
+                if not isinstance(av, dict):
+                    continue
                 name = av.get("ratingName", "")
                 if name and name != "Total":
                     ratings[name.lower().replace(" ", "_")] = int(safe_float(av.get("numberOfAnalystsLatest", 0)))
@@ -6137,13 +6221,16 @@ class SignalGenerator:
         
         # Recommendation bar summary
         recos_bar = details.get("recosBar", {})
-        if recos_bar:
+        if recos_bar and isinstance(recos_bar, dict):
+            # Ensure analyst_recommendations exists
+            if "analyst_recommendations" not in signals:
+                signals["analyst_recommendations"] = {"strong_buy": 0, "buy": 0, "hold": 0, "sell": 0, "strong_sell": 0, "total_analysts": 0, "buy_pct": 0, "sell_pct": 0, "consensus": "Unknown"}
             signals["analyst_recommendations"]["mean_rating"] = round(safe_float(recos_bar.get("meanValue")), 2)
             signals["analyst_recommendations"]["bullish_pct"] = round(safe_float(recos_bar.get("tickerPercentage")), 1)
         
         # 2. Risk Assessment
         risk_meter = details.get("riskMeter", {})
-        if risk_meter:
+        if risk_meter and isinstance(risk_meter, dict):
             signals["risk_assessment"] = {
                 "risk_category": risk_meter.get("categoryName", "Unknown"),
                 "std_deviation": safe_float(risk_meter.get("stdDev")),
@@ -6152,6 +6239,8 @@ class SignalGenerator:
         
         # 3. Key Metrics extraction
         key_metrics = details.get("keyMetrics", {})
+        if not isinstance(key_metrics, dict):
+            key_metrics = {}
         
         # Management Effectiveness
         mgmt = key_metrics.get("mgmtEffectiveness", [])
@@ -6190,16 +6279,19 @@ class SignalGenerator:
         
         # Valuation
         valuation = key_metrics.get("valuation", [])
+        if not isinstance(valuation, list):
+            valuation = []
+        peg_val = extract_metric(valuation, "pegRatio")
         signals["valuation_metrics"] = {
             "pe_ttm": extract_metric(valuation, "pPerEBasicExcludingExtraordinaryItemsTTM"),
             "pe_fy": extract_metric(valuation, "pPerEExcludingExtraordinaryItemsMostRecentFiscalYear"),
-            "peg_ratio": extract_metric(valuation, "pegRatio"),
+            "peg_ratio": peg_val,
             "price_to_book": extract_metric(valuation, "priceToBookMostRecentQuarter"),
             "price_to_sales": extract_metric(valuation, "priceToSalesTrailing"),
             "price_to_cash_flow": extract_metric(valuation, "priceToCashFlowPerShare"),
             "dividend_yield": extract_metric(valuation, "currentDividendYield"),
             "dividend_yield_5yr": extract_metric(valuation, "dividendYield5Year"),
-            "ev_commentary": "Expensive" if extract_metric(valuation, "pegRatio") and extract_metric(valuation, "pegRatio") > 2 else "Fairly Valued" if extract_metric(valuation, "pegRatio") and extract_metric(valuation, "pegRatio") > 1 else "Undervalued"
+            "ev_commentary": "Expensive" if peg_val and peg_val > 2 else "Fairly Valued" if peg_val and peg_val > 1 else "Undervalued"
         }
         
         # Growth Metrics
@@ -6246,9 +6338,11 @@ class SignalGenerator:
         
         # 4. Technical Moving Averages
         tech_data = details.get("stockTechnicalData", [])
-        if tech_data:
+        if tech_data and isinstance(tech_data, list):
             signals["moving_averages"] = {}
             for t in tech_data:
+                if not isinstance(t, dict):
+                    continue
                 days = t.get("days")
                 price = safe_float(t.get("nsePrice", t.get("bsePrice")))
                 if days and price:
@@ -6256,12 +6350,14 @@ class SignalGenerator:
         
         # 5. Shareholding Pattern
         shareholding = details.get("shareholding", [])
-        if shareholding:
+        if shareholding and isinstance(shareholding, list):
             signals["shareholding"] = {}
             for category in shareholding:
+                if not isinstance(category, dict):
+                    continue
                 cat_name = category.get("displayName", "").lower()
                 holdings = category.get("categories", [])
-                if holdings:
+                if holdings and isinstance(holdings, list):
                     latest = holdings[-1] if holdings else {}
                     prev = holdings[-2] if len(holdings) > 1 else {}
                     
